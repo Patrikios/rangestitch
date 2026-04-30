@@ -9,18 +9,24 @@ import unittest
 import polars as pl
 from polars.testing import assert_frame_equal
 
-from rangestitch import interval_stitch
+import rangestitch
+from rangestitch import RangeStitch
 from reference_data import reference_expected_frame, reference_input_frame
 
 
 class IntervalStitchTests(unittest.TestCase):
+    def test_package_exports_only_range_stitch(self) -> None:
+        self.assertIn("RangeStitch", rangestitch.__all__)
+        self.assertNotIn("interval_stitch", rangestitch.__all__)
+        self.assertTrue(hasattr(rangestitch, "RangeStitch"))
+        self.assertFalse(hasattr(rangestitch, "interval_stitch"))
+        self.assertIs(rangestitch.RangeStitch, RangeStitch)
+
     def test_reference_dataset_matches_r_output(self) -> None:
-        actual = interval_stitch(
-            reference_input_frame(),
+        actual = RangeStitch(
             characteristic_beg_columns="CharacteristicBeg",
             characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
-            verbose=False,
-        )
+        ).stitch(reference_input_frame())
         expected = reference_expected_frame()
         assert_frame_equal(actual, expected)
 
@@ -46,12 +52,10 @@ class IntervalStitchTests(unittest.TestCase):
             ]
         )
 
-        actual = interval_stitch(
-            data,
+        actual = RangeStitch(
             characteristic_beg_columns="CharacteristicBeg",
             characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
-            verbose=False,
-        )
+        ).stitch(data)
         expected = pl.DataFrame(
             [
                 {
@@ -89,12 +93,10 @@ class IntervalStitchTests(unittest.TestCase):
             ]
         )
 
-        actual = interval_stitch(
-            data,
+        actual = RangeStitch(
             characteristic_beg_columns="CharacteristicBeg",
             characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
-            verbose=False,
-        )
+        ).stitch(data)
         expected = pl.DataFrame(
             [
                 {
@@ -132,12 +134,10 @@ class IntervalStitchTests(unittest.TestCase):
             ]
         )
 
-        actual = interval_stitch(
-            data,
+        actual = RangeStitch(
             characteristic_beg_columns="CharacteristicBeg",
             characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
-            verbose=False,
-        )
+        ).stitch(data)
         expected = pl.DataFrame(
             [
                 {
@@ -153,13 +153,13 @@ class IntervalStitchTests(unittest.TestCase):
 
         assert_frame_equal(actual, expected)
 
-    def test_interval_stitch_supports_custom_columns(self) -> None:
+    def test_range_stitch_supports_custom_columns(self) -> None:
         data = pl.DataFrame(
             [
                 {
                     "CustomerID": "A",
-                    "StartDate": "2020-01-01",
-                    "EndDate": "2020-01-01",
+                    "StartDate": date(2020, 1, 1),
+                    "EndDate": date(2020, 1, 1),
                     "StatusBeg": "New",
                     "StatusEnd": "Active",
                     "TypeBeg": "Basic",
@@ -167,8 +167,8 @@ class IntervalStitchTests(unittest.TestCase):
                 },
                 {
                     "CustomerID": "A",
-                    "StartDate": "2020-01-02",
-                    "EndDate": "2020-01-03",
+                    "StartDate": date(2020, 1, 2),
+                    "EndDate": date(2020, 1, 3),
                     "StatusBeg": "New",
                     "StatusEnd": "Active",
                     "TypeBeg": "Basic",
@@ -176,8 +176,8 @@ class IntervalStitchTests(unittest.TestCase):
                 },
                 {
                     "CustomerID": "A",
-                    "StartDate": "2020-02-01",
-                    "EndDate": "2020-02-05",
+                    "StartDate": date(2020, 2, 1),
+                    "EndDate": date(2020, 2, 5),
                     "StatusBeg": "Returning",
                     "StatusEnd": "Dormant",
                     "TypeBeg": "Premium",
@@ -185,8 +185,8 @@ class IntervalStitchTests(unittest.TestCase):
                 },
                 {
                     "CustomerID": "B",
-                    "StartDate": "2020-02-10",
-                    "EndDate": "2020-02-12",
+                    "StartDate": date(2020, 2, 10),
+                    "EndDate": date(2020, 2, 12),
                     "StatusBeg": "First",
                     "StatusEnd": "Active",
                     "TypeBeg": "Standard",
@@ -195,15 +195,13 @@ class IntervalStitchTests(unittest.TestCase):
             ]
         )
 
-        actual = interval_stitch(
-            data,
+        actual = RangeStitch(
             id_column="CustomerID",
             from_column="StartDate",
             to_column="EndDate",
             characteristic_beg_columns=["StatusBeg", "TypeBeg"],
             characteristic_end_columns=["StatusEnd", "TypeEnd"],
-            verbose=False,
-        )
+        ).stitch(data)
         expected = pl.DataFrame(
             [
                 {
@@ -238,127 +236,90 @@ class IntervalStitchTests(unittest.TestCase):
 
         assert_frame_equal(actual, expected)
 
-    def test_interval_stitch_supports_gap_diagnostics_and_output_columns(self) -> None:
-        data = pl.DataFrame(
+    def test_range_stitch_can_be_reused_across_multiple_dataframes(self) -> None:
+        stitcher = RangeStitch(
+            characteristic_beg_columns="CharacteristicBeg",
+            characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
+        )
+
+        first_data = pl.DataFrame(
             [
                 {
                     "ID": 1,
                     "From": date(2020, 1, 1),
-                    "To": date(2020, 1, 1),
+                    "To": date(2020, 1, 10),
                     "CharacteristicBeg": "a",
-                    "CharacteristicEnd1": 1,
+                    "CharacteristicEnd1": None,
                     "CharacteristicEnd2": None,
                 },
                 {
                     "ID": 1,
-                    "From": date(2020, 1, 2),
-                    "To": date(2020, 1, 2),
+                    "From": date(2020, 1, 11),
+                    "To": date(2020, 1, 12),
                     "CharacteristicBeg": "b",
-                    "CharacteristicEnd1": 2,
-                    "CharacteristicEnd2": None,
+                    "CharacteristicEnd1": 4,
+                    "CharacteristicEnd2": 5,
+                },
+            ]
+        )
+        second_data = pl.DataFrame(
+            [
+                {
+                    "ID": 2,
+                    "From": date(2020, 2, 1),
+                    "To": date(2020, 2, 2),
+                    "CharacteristicBeg": "c",
+                    "CharacteristicEnd1": 7,
+                    "CharacteristicEnd2": 8,
+                },
+                {
+                    "ID": 2,
+                    "From": date(2020, 2, 4),
+                    "To": date(2020, 2, 5),
+                    "CharacteristicBeg": "d",
+                    "CharacteristicEnd1": 9,
+                    "CharacteristicEnd2": 10,
                 },
             ]
         )
 
-        actual = interval_stitch(
-            data,
-            gap_threshold=0,
-            keep_all_periods=True,
-            include_gap_column=True,
-            output_columns=["ID", "From", "To", "Difference"],
-            verbose=False,
-        )
-        expected = pl.DataFrame(
+        first_actual = stitcher.stitch(first_data)
+        second_actual = stitcher.stitch(second_data)
+        first_expected = pl.DataFrame(
             [
                 {
                     "ID": "1",
                     "From": date(2020, 1, 1),
-                    "To": date(2020, 1, 1),
-                    "Difference": float("inf"),
-                },
-                {
-                    "ID": "1",
-                    "From": date(2020, 1, 2),
-                    "To": date(2020, 1, 2),
-                    "Difference": 1.0,
-                },
-            ]
-        ).cast(actual.schema)
-
-        assert_frame_equal(actual, expected)
-
-    def test_gap_diagnostics_support_custom_difference_column(self) -> None:
-        data = pl.DataFrame(
-            [
-                {
-                    "ID": 3,
-                    "From": date(2020, 1, 1),
-                    "To": date(2020, 1, 1),
+                    "To": date(2020, 1, 12),
                     "CharacteristicBeg": "a",
-                    "CharacteristicEnd1": 1,
-                    "CharacteristicEnd2": None,
-                },
-                {
-                    "ID": 3,
-                    "From": date(2020, 1, 3),
-                    "To": date(2020, 1, 3),
-                    "CharacteristicBeg": "b",
-                    "CharacteristicEnd1": 2,
-                    "CharacteristicEnd2": None,
-                },
-            ]
-        )
-
-        actual = interval_stitch(
-            data,
-            gap_threshold=0,
-            keep_all_periods=True,
-            include_gap_column=True,
-            difference_column="GapDays",
-            output_columns=["ID", "From", "To", "GapDays"],
-            verbose=False,
-        )
-        expected = pl.DataFrame(
-            [
-                {
-                    "ID": "3",
-                    "From": date(2020, 1, 1),
-                    "To": date(2020, 1, 1),
-                    "GapDays": float("inf"),
-                },
-                {
-                    "ID": "3",
-                    "From": date(2020, 1, 3),
-                    "To": date(2020, 1, 3),
-                    "GapDays": 2.0,
-                },
-            ]
-        ).cast(actual.schema)
-
-        assert_frame_equal(actual, expected)
-
-    def test_difference_column_must_not_overlap_existing_columns(self) -> None:
-        data = pl.DataFrame(
-            [
-                {
-                    "ID": 1,
-                    "From": date(2020, 1, 1),
-                    "To": date(2020, 1, 1),
-                    "CharacteristicBeg": "a",
-                    "CharacteristicEnd1": 1,
-                    "CharacteristicEnd2": None,
+                    "CharacteristicEnd1": 4,
+                    "CharacteristicEnd2": 5,
                 }
             ]
-        )
+        ).cast(first_actual.schema)
+        second_expected = pl.DataFrame(
+            [
+                {
+                    "ID": "2",
+                    "From": date(2020, 2, 1),
+                    "To": date(2020, 2, 2),
+                    "CharacteristicBeg": "c",
+                    "CharacteristicEnd1": 7,
+                    "CharacteristicEnd2": 8,
+                },
+                {
+                    "ID": "2",
+                    "From": date(2020, 2, 4),
+                    "To": date(2020, 2, 5),
+                    "CharacteristicBeg": "d",
+                    "CharacteristicEnd1": 9,
+                    "CharacteristicEnd2": 10,
+                },
+            ]
+        ).cast(second_actual.schema)
 
-        with self.assertRaisesRegex(ValueError, "difference_column must not overlap other selected columns"):
-            interval_stitch(
-                data,
-                keep_all_periods=True,
-                include_gap_column=True,
-                difference_column="To",
-                verbose=False,
-            )
+        assert_frame_equal(first_actual, first_expected)
+        assert_frame_equal(second_actual, second_expected)
 
     def test_missing_requested_characteristic_column_raises_validation_error(self) -> None:
         data = pl.DataFrame(
@@ -373,12 +334,10 @@ class IntervalStitchTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "missing required columns: CharacteristicEnd1"):
-            interval_stitch(
-                data,
+            RangeStitch(
                 characteristic_beg_columns="CharacteristicBeg",
                 characteristic_end_columns="CharacteristicEnd1",
-                verbose=False,
-            )
+            ).stitch(data)
 
     def test_datetime_ranges_support_timedelta_gap_threshold(self) -> None:
         data = pl.DataFrame(
@@ -402,13 +361,11 @@ class IntervalStitchTests(unittest.TestCase):
             ]
         )
 
-        actual = interval_stitch(
-            data,
+        actual = RangeStitch(
             gap_threshold=timedelta(minutes=30),
             characteristic_beg_columns="CharacteristicBeg",
             characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
-            verbose=False,
-        )
+        ).stitch(data)
         expected = pl.DataFrame(
             [
                 {
@@ -424,82 +381,91 @@ class IntervalStitchTests(unittest.TestCase):
 
         assert_frame_equal(actual, expected)
 
-    def test_datetime_ranges_support_numeric_gap_units(self) -> None:
-        data = pl.DataFrame(
-            [
-                {
-                    "ID": 12,
-                    "From": "2024-02-01T12:00:00",
-                    "To": "2024-02-01T12:00:05",
-                    "CharacteristicBeg": "start",
-                    "CharacteristicEnd1": None,
-                    "CharacteristicEnd2": None,
-                },
-                {
-                    "ID": 12,
-                    "From": "2024-02-01T12:00:07",
-                    "To": "2024-02-01T12:00:10",
-                    "CharacteristicBeg": "later",
-                    "CharacteristicEnd1": 8,
-                    "CharacteristicEnd2": 9,
-                },
-            ]
-        )
-
-        actual = interval_stitch(
-            data,
-            gap_threshold=2,
-            gap_units="secs",
-            characteristic_beg_columns="CharacteristicBeg",
-            characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
-            verbose=False,
-        )
-        expected = pl.DataFrame(
-            [
-                {
-                    "ID": "12",
-                    "From": datetime(2024, 2, 1, 12, 0, 0),
-                    "To": datetime(2024, 2, 1, 12, 0, 10),
-                    "CharacteristicBeg": "start",
-                    "CharacteristicEnd1": 8,
-                    "CharacteristicEnd2": 9,
-                }
-            ]
-        ).cast(actual.schema)
-
-        assert_frame_equal(actual, expected)
-
-    def test_sub_day_gap_threshold_requires_datetime_columns(self) -> None:
+    def test_date_based_stitching_requires_whole_day_gap_thresholds(self) -> None:
         data = pl.DataFrame(
             [
                 {
                     "ID": 1,
                     "From": date(2020, 1, 1),
                     "To": date(2020, 1, 1),
-                    "CharacteristicBeg": "a",
-                    "CharacteristicEnd1": 1,
-                    "CharacteristicEnd2": None,
                 },
                 {
                     "ID": 1,
                     "From": date(2020, 1, 2),
                     "To": date(2020, 1, 2),
-                    "CharacteristicBeg": "b",
-                    "CharacteristicEnd1": 2,
-                    "CharacteristicEnd2": None,
                 },
             ]
         )
 
-        with self.assertRaisesRegex(ValueError, "sub-day gap thresholds require datetime-like from/to columns"):
-            interval_stitch(
-                data,
-                gap_threshold=30,
-                gap_units="mins",
-                verbose=False,
-            )
+        with self.assertRaisesRegex(ValueError, "date-based stitching requires whole-day gap thresholds"):
+            RangeStitch(
+                gap_threshold=timedelta(minutes=30),
+            ).stitch(data)
 
-    def test_verbose_uses_logging_instead_of_print(self) -> None:
+    def test_range_stitch_requires_polars_dataframe_input(self) -> None:
+        with self.assertRaisesRegex(TypeError, "data_frame must be a polars.DataFrame"):
+            RangeStitch().stitch([{"ID": 1, "From": date(2020, 1, 1), "To": date(2020, 1, 1)}])
+
+    def test_range_stitch_requires_polars_temporal_columns(self) -> None:
+        data = pl.DataFrame(
+            [
+                {
+                    "ID": 1,
+                    "From": "2024-01-01",
+                    "To": "2024-01-02",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(TypeError, "must both be pl.Date or matching pl.Datetime columns"):
+            RangeStitch().stitch(data)
+
+    def test_range_stitch_rejects_mixed_date_and_datetime_columns(self) -> None:
+        data = pl.DataFrame(
+            {
+                "ID": [1],
+                "From": [date(2024, 1, 1)],
+                "To": [datetime(2024, 1, 1, 0, 0, 0)],
+            },
+            schema={
+                "ID": pl.Int64,
+                "From": pl.Date,
+                "To": pl.Datetime("us"),
+            },
+        )
+
+        with self.assertRaisesRegex(TypeError, "must both be pl.Date or matching pl.Datetime columns"):
+            RangeStitch().stitch(data)
+
+    def test_empty_input_preserves_output_schema(self) -> None:
+        data = pl.DataFrame(
+            schema={
+                "ID": pl.Int64,
+                "From": pl.Date,
+                "To": pl.Date,
+                "CharacteristicBeg": pl.String,
+                "CharacteristicEnd1": pl.Int64,
+            }
+        )
+
+        actual = RangeStitch(
+            characteristic_beg_columns="CharacteristicBeg",
+            characteristic_end_columns="CharacteristicEnd1",
+        ).stitch(data)
+
+        self.assertEqual(
+            actual.schema,
+            {
+                "ID": pl.String,
+                "From": pl.Date,
+                "To": pl.Date,
+                "CharacteristicBeg": pl.String,
+                "CharacteristicEnd1": pl.Int64,
+            },
+        )
+        self.assertEqual(actual.height, 0)
+
+    def test_range_stitch_uses_logging_instead_of_print(self) -> None:
         data = pl.DataFrame(
             [
                 {
@@ -515,13 +481,14 @@ class IntervalStitchTests(unittest.TestCase):
 
         stdout_buffer = StringIO()
         with self.assertLogs("rangestitch.timeline", level="INFO") as captured, redirect_stdout(stdout_buffer):
-            interval_stitch(data, verbose=True)
+            RangeStitch().stitch(data)
 
         self.assertEqual(stdout_buffer.getvalue(), "")
-        self.assertIn("Starting interval_stitch", captured.output[0])
-        self.assertIn("Interval stitching completed", captured.output[-1])
+        self.assertIn("Starting range stitching", captured.output[0])
+        self.assertIn("Range stitching completed", captured.output[-1])
+        self.assertNotIn("interval_stitch", " ".join(captured.output))
 
-    def test_verbose_respects_existing_logger_level(self) -> None:
+    def test_range_stitch_respects_existing_logger_level(self) -> None:
         data = pl.DataFrame(
             [
                 {
@@ -546,7 +513,7 @@ class IntervalStitchTests(unittest.TestCase):
         logger.propagate = False
 
         try:
-            interval_stitch(data, verbose=True)
+            RangeStitch().stitch(data)
         finally:
             logger.handlers = original_handlers
             logger.setLevel(original_level)

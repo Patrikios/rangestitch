@@ -1,20 +1,16 @@
 # rangestitch
 
-`rangestitch` is a small Python library for merging, stitching, and analyzing date or datetime intervals with [Polars](https://pola.rs/).
+`rangestitch` is a small Python library for stitching typed date or datetime intervals with [Polars](https://pola.rs/).
 
-It is designed for datasets that contain repeated periods per entity, such as customer relationship spans, subscription windows, coverage periods, or employment ranges. The library groups intervals by ID, merges overlapping or adjacent ranges, and carries forward "begin" and "end" characteristics in a predictable way.
+It is designed for datasets that contain repeated periods per entity, such as customer relationship spans, subscription windows, coverage periods, or employment ranges. The library groups intervals by ID, merges overlapping or near-adjacent ranges, and carries forward "begin" and "end" characteristics in a predictable way.
 
 ## Features
 
 - Merge overlapping intervals per entity.
 - Stitch adjacent intervals when the gap is within a configurable threshold.
 - Preserve the first "begin" characteristics in a stitched block.
-- Take the "end" characteristics from the row that contributes the final end date in that block.
-- Accept `polars.DataFrame` input or any iterable of row dictionaries.
-- Support `date`, `datetime`, and ISO date/datetime string inputs.
-- Preserve datetime precision when either interval column is datetime-like.
-- Support day-based legacy gaps, explicit `timedelta` thresholds, and numeric thresholds with configurable `gap_units`.
-- Expose a single `interval_stitch()` API for stitching temporal intervals.
+- Take the "end" characteristics from the row that contributes the final end bound in that block.
+- Expose a single `RangeStitch` API for typed Polars DataFrames.
 
 ## Requirements
 
@@ -41,6 +37,17 @@ If you use `uv`:
 uv sync
 ```
 
+## Contract
+
+`RangeStitch(...).stitch()` intentionally supports a narrow API:
+
+- `data_frame` must be a `polars.DataFrame`
+- `From` and `To` must already be typed as `pl.Date` or matching `pl.Datetime` dtypes
+- numeric `gap_threshold` values are interpreted as days
+- for sub-day datetime gaps, pass `datetime.timedelta`
+
+The API does not parse ISO strings, normalize timezones, project custom output subsets, or add gap-diagnostic columns.
+
 ## Quick Start
 
 Date-based stitching:
@@ -50,7 +57,7 @@ from datetime import date
 
 import polars as pl
 
-from rangestitch import interval_stitch
+from rangestitch import RangeStitch
 
 data = pl.DataFrame(
     [
@@ -81,12 +88,11 @@ data = pl.DataFrame(
     ]
 )
 
-result = interval_stitch(
-    data,
+stitcher = RangeStitch(
     characteristic_beg_columns="CharacteristicBeg",
     characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
-    verbose=False,
 )
+result = stitcher.stitch(data)
 print(result)
 ```
 
@@ -104,12 +110,6 @@ shape: (2, 6)
 +-----+------------+------------+-------------------+--------------------+--------------------+
 ```
 
-The two ranges for `ID=1` are stitched because they are adjacent. The stitched record keeps:
-
-- the first `CharacteristicBeg` value in the block
-- the final `To` date across the block
-- the end characteristics from the row that contributed that final `To` date
-
 Datetime-based stitching:
 
 ```python
@@ -117,7 +117,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from rangestitch import interval_stitch
+from rangestitch import RangeStitch
 
 data = pl.DataFrame(
     [
@@ -125,39 +125,19 @@ data = pl.DataFrame(
             "ID": 1,
             "From": datetime(2024, 1, 1, 9, 0, 0),
             "To": datetime(2024, 1, 1, 10, 0, 0),
-            "CharacteristicBeg": "open",
-            "CharacteristicEnd1": None,
-            "CharacteristicEnd2": None,
         },
         {
             "ID": 1,
             "From": datetime(2024, 1, 1, 10, 30, 0),
             "To": datetime(2024, 1, 1, 11, 0, 0),
-            "CharacteristicBeg": "continued",
-            "CharacteristicEnd1": 5,
-            "CharacteristicEnd2": 6,
         },
     ]
 )
 
-result = interval_stitch(
-    data,
+stitcher = RangeStitch(
     gap_threshold=timedelta(minutes=30),
-    characteristic_beg_columns="CharacteristicBeg",
-    characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
-    verbose=False,
 )
-```
-
-Numeric thresholds remain day-based by default for backward compatibility. For sub-day numeric gaps, pass `gap_units`:
-
-```python
-result = interval_stitch(
-    data,
-    gap_threshold=30,
-    gap_units="mins",
-    verbose=False,
-)
+result = stitcher.stitch(data)
 ```
 
 ## How Stitching Works
@@ -165,7 +145,7 @@ result = interval_stitch(
 For each ID, rows are sorted by:
 
 1. the ID column
-2. the start-date column
+2. the start-bound column
 3. original input order
 
 Ranges are then grouped into blocks:
@@ -174,70 +154,60 @@ Ranges are then grouped into blocks:
 - If the gap between the next `From` and the running maximum `To` is less than or equal to `gap_threshold`, it is stitched into the same block.
 - Otherwise, a new block starts.
 
-Gap interpretation:
-
-- Numeric `gap_threshold` values use days by default.
-- For datetime workflows, you can pass a Python `timedelta` for exact sub-day gaps.
-- For datetime workflows, you can also combine numeric `gap_threshold` values with `gap_units="days"`, `"hours"`, `"mins"`, or `"secs"`.
-- A new block starts only when `From - previous To > gap_threshold`.
-
 Characteristic handling inside a stitched block:
 
 - "Begin" characteristic columns use the first row in the block.
-- "End" characteristic columns use the first row whose end date matches the block's maximum end date.
+- "End" characteristic columns use the first row whose end bound matches the block's maximum end bound.
 
 ## API
 
-The package exports a single public function:
+The package exports a single public class:
 
 ```python
-from rangestitch import interval_stitch
+from rangestitch import RangeStitch
 ```
 
-### Key Parameters
+Create a configured stitcher once, then call `.stitch(data_frame)` for each compatible frame. This is useful when several DataFrames share the same column mapping and gap settings.
 
-- `data_frame`: a `polars.DataFrame` or an iterable of row mappings.
-- `gap_threshold`: maximum gap allowed between periods before a new block starts. Numeric values are interpreted as days by default, preserving the legacy API. For datetime workflows you can also pass `datetime.timedelta` values or combine numeric thresholds with `gap_units`. A new block starts only when `From - previous To > gap_threshold`. Default: `1`.
-- `gap_units`: units for numeric `gap_threshold` values. One of `"auto"`, `"days"`, `"hours"`, `"mins"`, or `"secs"`. `"auto"` preserves the legacy day-based behavior. Default: `"auto"`.
+### Constructor Parameters
+
+- `gap_threshold`: maximum gap allowed between periods before a new block starts. Numeric values are interpreted as days. For sub-day datetime workflows, pass `datetime.timedelta`. Default: `1`.
 - `id_column`: entity identifier column. Default: `"ID"`.
-- `from_column`: interval start column. Values may be Python `date` objects, Python `datetime` objects, ISO date strings, ISO datetime strings, or Polars date/datetime columns. Default: `"From"`.
-- `to_column`: interval end column. Values may be Python `date` objects, Python `datetime` objects, ISO date strings, ISO datetime strings, or Polars date/datetime columns. Default: `"To"`.
+- `from_column`: interval start column. Must already be typed as `pl.Date` or `pl.Datetime`. Default: `"From"`.
+- `to_column`: interval end column. Must already be typed as `pl.Date` or `pl.Datetime` and match `from_column`. Default: `"To"`.
 - `characteristic_beg_columns`: optional columns whose values should come from the first row of a stitched block.
-- `characteristic_end_columns`: optional columns whose values should come from the row with the block's final end date.
-- `keep_all_periods`: compatibility flag currently used together with `include_gap_column` to enable gap diagnostics in the returned output.
-- `output_columns`: optional subset and order of columns to return.
-- `include_gap_column`: when used with `keep_all_periods=True`, adds the configured gap-diagnostics column.
-- `difference_column`: name of the gap-diagnostics output column. Default: `"Difference"`.
-- `verbose`: when `True`, emits INFO-level log messages for interval normalization, gap handling, and output size through the standard `rangestitch.timeline` logger.
+- `characteristic_end_columns`: optional columns whose values should come from the row with the block's final end bound.
+
+### Method
+
+- `stitch(data_frame)`: stitches one `polars.DataFrame` using the stored configuration.
 
 ### Important Notes
 
 - Output IDs are cast to strings.
 - Characteristic columns are only included if you explicitly pass them.
-- Verbose mode uses Python's `logging` module under the `rangestitch.timeline` logger.
-- Configure handlers and the logger level yourself, for example with `logging.basicConfig(level=logging.INFO)` or by setting the `rangestitch.timeline` logger level directly before calling `interval_stitch`.
-- If either interval column is datetime-like, both interval columns are normalized to datetimes and time-of-day precision is preserved.
-- If both interval columns are date-like, they are normalized to dates and gap calculations are day-based.
-- Sub-day thresholds require datetime-like interval columns.
-- Requested columns are validated against the input DataFrame before stitching begins.
+- `From` and `To` must already be typed as Polars temporal columns.
+- Mixed `pl.Date` / `pl.Datetime` interval bounds are rejected.
+- Date-based stitching requires whole-day gap thresholds.
 - Missing required columns raise `ValueError`.
-- Null IDs or null start/end dates raise `ValueError`.
-- Temporal columns can be Python `date` objects, Python `datetime` objects, ISO date/datetime strings, or Polars date/datetime columns.
+- Null IDs or null start/end bounds raise `ValueError`.
 - Column roles must not overlap. For example, the same column cannot be both the ID column and a characteristic column.
 
 ## Custom Column Example
 
 ```python
+from datetime import date
+
 import polars as pl
 
-from rangestitch import interval_stitch
+from rangestitch import RangeStitch
 
 data = pl.DataFrame(
     [
         {
             "CustomerID": "A",
-            "StartDate": "2020-01-01",
-            "EndDate": "2020-01-01",
+            "StartDate": date(2020, 1, 1),
+            "EndDate": date(2020, 1, 1),
             "StatusBeg": "New",
             "StatusEnd": "Active",
             "TypeBeg": "Basic",
@@ -245,8 +215,8 @@ data = pl.DataFrame(
         },
         {
             "CustomerID": "A",
-            "StartDate": "2020-01-02",
-            "EndDate": "2020-01-03",
+            "StartDate": date(2020, 1, 2),
+            "EndDate": date(2020, 1, 3),
             "StatusBeg": "New",
             "StatusEnd": "Active",
             "TypeBeg": "Basic",
@@ -255,52 +225,30 @@ data = pl.DataFrame(
     ]
 )
 
-result = interval_stitch(
-    data,
+stitcher = RangeStitch(
     id_column="CustomerID",
     from_column="StartDate",
     to_column="EndDate",
     characteristic_beg_columns=["StatusBeg", "TypeBeg"],
     characteristic_end_columns=["StatusEnd", "TypeEnd"],
-    verbose=False,
 )
+result = stitcher.stitch(data)
 ```
 
-## Gap Diagnostics
+## Logging
 
-When you want every stitched block per ID plus the distance from the previous block, enable `keep_all_periods=True` and `include_gap_column=True`.
+`rangestitch` uses standard library logging and does not expose a per-call verbosity flag.
+
+By default, the package is silent and installs a `NullHandler`. To see stitching progress logs, configure the `rangestitch` logger hierarchy in your application:
 
 ```python
-from datetime import date
+import logging
 
-import polars as pl
-
-from rangestitch import interval_stitch
-
-data = pl.DataFrame(
-    [
-        {"ID": 1, "From": date(2020, 1, 1), "To": date(2020, 1, 1), "CharacteristicBeg": "a", "CharacteristicEnd1": 1, "CharacteristicEnd2": None},
-        {"ID": 1, "From": date(2020, 1, 2), "To": date(2020, 1, 2), "CharacteristicBeg": "b", "CharacteristicEnd1": 2, "CharacteristicEnd2": None},
-    ]
-)
-
-result = interval_stitch(
-    data,
-    gap_threshold=0,
-    keep_all_periods=True,
-    include_gap_column=True,
-    difference_column="GapDays",
-    output_columns=["ID", "From", "To", "GapDays"],
-    verbose=False,
-)
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("rangestitch").setLevel(logging.INFO)
 ```
 
-In the gap-diagnostics column:
-
-- for date workflows, the first period for each ID is marked with positive infinity (`inf`)
-- later date-based periods contain the day difference from the previous stitched block's end date
-
-For datetime workflows, the configured gap-diagnostics column is returned as a Polars duration and the first period has a null difference.
+Progress messages are emitted from `rangestitch.timeline` at `INFO` level.
 
 ## Development
 
@@ -308,6 +256,40 @@ Run the test suite with:
 
 ```bash
 uv run python -m unittest discover -s tests
+```
+
+Run the verbose suite with per-test names:
+
+```bash
+uv run python -m unittest discover -s tests -v
+```
+
+Run the dedicated 1,000,000-row timing test:
+
+```bash
+RANGESTITCH_RUN_PERF_TESTS=1 uv run python -m unittest tests.test_performance -v
+```
+
+In PowerShell:
+
+```powershell
+$env:RANGESTITCH_RUN_PERF_TESTS='1'
+uv run python -m unittest tests.test_performance -v
+```
+
+To turn that benchmark into a pass/fail regression check, also set a maximum
+allowed stitching time in seconds:
+
+```bash
+RANGESTITCH_RUN_PERF_TESTS=1 RANGESTITCH_MAX_SECONDS_1M=5 uv run python -m unittest tests.test_performance -v
+```
+
+In PowerShell:
+
+```powershell
+$env:RANGESTITCH_RUN_PERF_TESTS='1'
+$env:RANGESTITCH_MAX_SECONDS_1M='5'
+uv run python -m unittest tests.test_performance -v
 ```
 
 If your environment requires system certificate discovery for `uv`, use:
@@ -320,10 +302,10 @@ The bundled tests cover:
 
 - stitching adjacent ranges
 - stitching datetime ranges with `timedelta` thresholds
-- stitching datetime ranges with numeric thresholds plus `gap_units`
 - preserving input order for equal start dates
-- tie behavior when multiple rows share the same final end date
+- tie behavior when multiple rows share the same final end bound
 - custom column mappings
-- gap-diagnostic output
-- validation for sub-day thresholds on date-only inputs
+- empty-result schema preservation
+- validation for non-DataFrame inputs
+- validation for non-temporal or mixed temporal interval columns
 - parity with the repository's bundled reference dataset

@@ -1,5 +1,9 @@
-from .timeline import interval_stitch
+import logging
+
+logging.getLogger(__name__).addHandler(logging.NullHandler())
+
+from .stitcher import RangeStitch
 
 __all__ = [
-    "interval_stitch",
+    "RangeStitch",
 ]
