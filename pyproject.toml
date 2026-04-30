@@ -5,12 +5,48 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rangestitch"
 version = "0.1.0"
-description = "A Python library for merging, stitching, and analyzing time intervals."
-readme = "README.md"
-requires-python = ">=3.14"
+description = "Stitch typed date and datetime intervals in Polars DataFrames."
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Patrikios", email = "Patrikios@users.noreply.github.com" },
+]
+license = { file = "LICENSE" }
+keywords = [
+    "polars",
+    "intervals",
+    "date-ranges",
+    "datetimes",
+    "data-processing",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "polars>=1.40.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/patrikios/rangestitch"
+Repository = "https://github.com/patrikios/rangestitch"
+Issues = "https://github.com/patrikios/rangestitch/issues"
+
+[tool.setuptools.package-data]
+rangestitch = ["py.typed"]
 
 [tool.setuptools.packages.find]
 include = ["rangestitch*"]

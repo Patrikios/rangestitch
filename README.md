@@ -17,7 +17,7 @@ It is designed for datasets that contain repeated periods per entity, such as cu
 
 ## Requirements
 
-- Python `>=3.14`
+- Python `>=3.10`
 - `polars>=1.40.1`
 
 ## Installation
@@ -25,15 +25,15 @@ It is designed for datasets that contain repeated periods per entity, such as cu
 Install directly from a public GitHub repository:
 
 ```bash
-pip install git+https://github.com/patrikios/rangeStitch.git
+pip install git+https://github.com/patrikios/rangestitch.git
 ```
 
 Install a specific branch, tag, or commit:
 
 ```bash
-pip install git+https://github.com/patrikios/rangeStitch.git@main
-pip install git+https://github.com/patrikios/rangeStitch.git@<tag>
-pip install git+https://github.com/patrikios/rangeStitch.git@<commit-hash>
+pip install git+https://github.com/patrikios/rangestitch.git@main
+pip install git+https://github.com/patrikios/rangestitch.git@<tag>
+pip install git+https://github.com/patrikios/rangestitch.git@<commit-hash>
 ```
 
 Install from the repository:
@@ -503,3 +503,7 @@ The bundled tests cover:
 - logging behavior
 - an optional deterministic 1,000,000-row timing test
 - an optional 1,000,000-row performance regression gate via `RANGESTITCH_MAX_SECONDS_1M`
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
