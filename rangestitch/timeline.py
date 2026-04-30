@@ -9,10 +9,33 @@ from typing import Any, Literal, Mapping
 
 import polars as pl
 
+# Used only for date-based gap diagnostics in ``interval_stitch()`` to mark
+# the first stitched period for each ID, which has no previous block to compare
+# against.
+# Example: the first stitched row for ``ID="A"`` gets ``Difference = inf``.
 _FIRST_PERIOD_SENTINEL = float("inf")
+
+# Keeps all normalized Polars datetime columns on one explicit precision so
+# casts and mapped values produce the same dtype throughout ``_datetime_expr()``
+# and ``_prepare_frame()``.
+# Example: date columns promoted to datetimes become ``pl.Datetime("us")``.
 _DATETIME_TIME_UNIT = "us"
+
+# Canonical internal unit names used after ``_normalize_gap_units()`` resolves
+# the spellings accepted by the public ``gap_units`` argument.
+# Example: ``"minutes"`` is normalized to the canonical value ``"mins"``.
 _GapUnit = Literal["auto", "days", "hours", "mins", "secs"]
+
+# Internal switch used while preparing the input frame to decide whether the
+# whole stitching run should use date or datetime comparisons.
+# Example: if either interval column contains ``2024-01-01T09:30:00``, the
+# shared kind becomes ``"datetime"``.
 _TemporalKind = Literal["date", "datetime"]
+
+# Human-friendly ``gap_units`` spellings accepted by ``interval_stitch()`` and
+# normalized by ``_normalize_gap_units()`` into the canonical ``_GapUnit``
+# values consumed by ``_normalize_gap_threshold()``.
+# Example: ``"hr"`` and ``"hours"`` both map to ``"hours"``.
 _GAP_UNIT_ALIASES: dict[str, _GapUnit] = {
     "auto": "auto",
     "day": "days",
@@ -30,17 +53,34 @@ _GAP_UNIT_ALIASES: dict[str, _GapUnit] = {
     "second": "secs",
     "seconds": "secs",
 }
+
+# Conversion factors used by ``_normalize_gap_threshold()`` to translate
+# numeric user input into a comparable ``timedelta``.
+# Example: ``2`` with normalized units ``"hours"`` becomes ``7200`` seconds.
 _SECONDS_PER_UNIT: dict[str, int] = {
     "days": 86_400,
     "hours": 3_600,
     "mins": 60,
     "secs": 1,
 }
+
+# Module-level logger used only by ``interval_stitch()`` when ``verbose=True``.
+# Example: ``logging.getLogger("rangestitch.timeline").setLevel(logging.INFO)``.
 _LOGGER = logging.getLogger(__name__)
 
 
 def _normalize_datetime(value: datetime) -> datetime:
-    """Return a timezone-normalized naive datetime value."""
+    """Normalize timezone-aware datetimes to a common naive UTC form.
+
+    This helper exists so interval comparisons use one clock even when input
+    rows mix offsets or ``Z`` timestamps. It is called by
+    ``_parse_temporal_string()``, ``_coerce_date()``, and
+    ``_coerce_datetime()`` before values reach ``_prepare_frame()``.
+
+    Example:
+        ``datetime(2024, 1, 1, 10, 0, tzinfo=timezone(timedelta(hours=1)))``
+        becomes ``datetime(2024, 1, 1, 9, 0)``.
+    """
 
     if value.tzinfo is None:
         return value
@@ -48,7 +88,18 @@ def _normalize_datetime(value: datetime) -> datetime:
 
 
 def _parse_temporal_string(value: str, *, column_name: str) -> date | datetime:
-    """Parse an ISO-like date or datetime string into a temporal value."""
+    """Parse ISO-like temporal strings into ``date`` or ``datetime`` objects.
+
+    This helper exists to let the public API accept string-based temporal
+    columns in addition to Python and Polars date types. It is used by
+    ``_coerce_date()``, ``_coerce_datetime()``, and
+    ``_infer_temporal_kind()`` when ``interval_stitch()`` receives string
+    input.
+
+    Example:
+        ``"2024-01-01"`` becomes ``date(2024, 1, 1)``, while
+        ``"2024-01-01T09:00:00Z"`` becomes ``datetime(2024, 1, 1, 9, 0)``.
+    """
 
     normalized = value.strip().replace("Z", "+00:00")
     try:
@@ -63,7 +114,17 @@ def _parse_temporal_string(value: str, *, column_name: str) -> date | datetime:
 
 
 def _coerce_date(value: Any, *, column_name: str) -> date:
-    """Normalize a supported date-like value into a ``datetime.date``."""
+    """Convert supported temporal inputs into a plain ``datetime.date``.
+
+    This helper exists so date-only workflows can accept Python dates,
+    datetimes, and ISO strings through one path. It is used inside
+    ``_date_expr()`` when ``_prepare_frame()`` normalizes interval bounds for
+    ``interval_stitch()``.
+
+    Example:
+        ``"2024-01-01T09:30:00Z"`` becomes ``date(2024, 1, 1)`` and
+        ``datetime(2024, 1, 1, 9, 30)`` also becomes ``date(2024, 1, 1)``.
+    """
 
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
@@ -76,7 +137,17 @@ def _coerce_date(value: Any, *, column_name: str) -> date:
 
 
 def _coerce_datetime(value: Any, *, column_name: str) -> datetime:
-    """Normalize a supported temporal value into a naive ``datetime``."""
+    """Convert supported temporal inputs into a naive normalized ``datetime``.
+
+    This helper exists so datetime workflows can accept Python dates,
+    datetimes, and ISO strings while preserving a single comparison format. It
+    is used inside ``_datetime_expr()`` when ``_prepare_frame()`` normalizes
+    interval bounds for ``interval_stitch()``.
+
+    Example:
+        ``date(2024, 1, 1)`` becomes ``datetime(2024, 1, 1, 0, 0)`` and
+        ``"2024-01-01T09:30:00+01:00"`` becomes ``datetime(2024, 1, 1, 8, 30)``.
+    """
 
     if isinstance(value, datetime):
         return _normalize_datetime(value)
@@ -91,13 +162,33 @@ def _coerce_datetime(value: Any, *, column_name: str) -> datetime:
 
 
 def _dtype_matches(dtype: pl.DataType, base_type: pl.DataType) -> bool:
-    """Return whether a Polars dtype matches a concrete or parametric base type."""
+    """Check Polars dtypes against concrete or parameterized base types.
+
+    This helper exists because Polars temporal dtypes may carry parameters such
+    as time units, and direct equality is not always enough. It is used by
+    ``_date_expr()``, ``_datetime_expr()``, and ``_infer_temporal_kind()`` to
+    decide how much coercion ``interval_stitch()`` needs.
+
+    Example:
+        ``_dtype_matches(pl.Datetime("us"), pl.Datetime)`` returns ``True``
+        even though the dtype carries a time-unit parameter.
+    """
 
     return dtype == base_type or getattr(dtype, "base_type", lambda: None)() == base_type
 
 
 def _date_expr(column_name: str, dtype: pl.DataType) -> pl.Expr:
-    """Build a Polars expression that coerces a column to ``pl.Date``."""
+    """Build the Polars expression for date-only interval normalization.
+
+    This helper exists to keep the date coercion logic in expression form so
+    Polars can handle already-typed columns efficiently and only fall back to
+    Python mapping when needed. It is selected by ``_temporal_expr()`` and used
+    by ``_prepare_frame()`` before ``interval_stitch()`` performs stitching.
+
+    Example:
+        with ``column_name="From"`` and ``dtype=pl.Datetime("us")``, the
+        returned expression behaves like ``pl.col("From").dt.date()``.
+    """
 
     if _dtype_matches(dtype, pl.Date):
         return pl.col(column_name)
@@ -110,7 +201,16 @@ def _date_expr(column_name: str, dtype: pl.DataType) -> pl.Expr:
 
 
 def _datetime_expr(column_name: str, dtype: pl.DataType) -> pl.Expr:
-    """Build a Polars expression that coerces a column to ``pl.Datetime``."""
+    """Build the Polars expression for datetime interval normalization.
+
+    This helper exists to preserve datetime precision while still accepting
+    date-only and string input. It is selected by ``_temporal_expr()`` and used
+    by ``_prepare_frame()`` before ``interval_stitch()`` performs stitching.
+
+    Example:
+        with ``column_name="From"`` and ``dtype=pl.Date``, the returned
+        expression casts that column to ``pl.Datetime("us")``.
+    """
 
     if _dtype_matches(dtype, pl.Datetime):
         return pl.col(column_name).cast(pl.Datetime(_DATETIME_TIME_UNIT))
@@ -123,13 +223,33 @@ def _datetime_expr(column_name: str, dtype: pl.DataType) -> pl.Expr:
 
 
 def _frame_from_input(data_frame: pl.DataFrame | Iterable[Mapping[str, Any]]) -> pl.DataFrame:
-    """Return a DataFrame for either frame input or row-mapping input."""
+    """Convert supported input shapes into a ``polars.DataFrame``.
+
+    This helper exists so the public function can accept either an existing
+    frame or an iterable of row mappings without branching throughout the main
+    algorithm. It is only used by ``_prepare_frame()`` near the start of
+    ``interval_stitch()``.
+
+    Example:
+        ``[{"ID": 1, "From": "2024-01-01", "To": "2024-01-02"}]`` becomes a
+        one-row ``pl.DataFrame``.
+    """
 
     return data_frame if isinstance(data_frame, pl.DataFrame) else pl.DataFrame(data_frame)
 
 
 def _infer_temporal_kind(series: pl.Series, *, column_name: str) -> _TemporalKind:
-    """Infer whether a column should be treated as date-based or datetime-based."""
+    """Infer whether one interval column behaves like dates or datetimes.
+
+    This helper exists because string and object columns do not always carry
+    enough schema information for Polars alone to decide the comparison
+    precision. It is called by ``_resolve_temporal_kind()`` while
+    ``_prepare_frame()`` chooses the normalization path for ``interval_stitch()``.
+
+    Example:
+        a series containing ``"2024-01-01T09:00:00"`` is inferred as
+        ``"datetime"``, while ``"2024-01-01"`` stays ``"date"``.
+    """
 
     if _dtype_matches(series.dtype, pl.Datetime):
         return "datetime"
@@ -157,7 +277,16 @@ def _resolve_temporal_kind(
     from_column: str,
     to_column: str,
 ) -> _TemporalKind:
-    """Resolve the temporal precision that should be used for interval bounds."""
+    """Choose one shared temporal precision for both interval bound columns.
+
+    This helper exists so ``From`` and ``To`` are normalized consistently: if
+    either side is datetime-like, both columns are treated as datetimes. It is
+    used only by ``_prepare_frame()`` before the main stitching logic runs.
+
+    Example:
+        if ``From`` contains dates and ``To`` contains datetimes, the resolved
+        kind is ``"datetime"`` for both columns.
+    """
 
     kinds = {
         _infer_temporal_kind(frame.get_column(from_column), column_name=from_column),
@@ -167,7 +296,16 @@ def _resolve_temporal_kind(
 
 
 def _temporal_expr(column_name: str, dtype: pl.DataType, *, temporal_kind: _TemporalKind) -> pl.Expr:
-    """Build the normalization expression for the requested temporal precision."""
+    """Dispatch to the correct temporal normalization expression builder.
+
+    This helper exists to keep ``_prepare_frame()`` simple while still routing
+    each interval column through either date or datetime coercion. It chooses
+    between ``_date_expr()`` and ``_datetime_expr()`` for ``interval_stitch()``.
+
+    Example:
+        ``_temporal_expr("From", pl.Date, temporal_kind="datetime")`` chooses
+        ``_datetime_expr()`` rather than ``_date_expr()``.
+    """
 
     if temporal_kind == "datetime":
         return _datetime_expr(column_name, dtype)
@@ -179,7 +317,16 @@ def _normalize_column_argument(
     *,
     argument_name: str,
 ) -> list[str]:
-    """Normalize an optional column argument into a validated list of names."""
+    """Turn optional column-name arguments into validated string lists.
+
+    This helper exists because the public API accepts either one column name, a
+    sequence of names, or ``None`` for several parameters. It is used by
+    ``interval_stitch()`` for ``characteristic_*_columns`` and
+    ``output_columns`` before validation and projection.
+
+    Example:
+        ``"StatusBeg"`` becomes ``["StatusBeg"]`` and ``None`` becomes ``[]``.
+    """
 
     if value is None:
         return []
@@ -196,7 +343,16 @@ def _normalize_column_argument(
 
 
 def _ordered_unique(columns: Sequence[str]) -> list[str]:
-    """Return unique column names while preserving their first-seen order."""
+    """Deduplicate column names without changing the caller's ordering.
+
+    This helper exists so required-column selection stays stable while avoiding
+    repeated work when the same column is referenced across internal lists. It
+    is used by ``_prepare_frame()`` when building the frame slice consumed by
+    ``interval_stitch()``.
+
+    Example:
+        ``["ID", "From", "ID", "To"]`` becomes ``["ID", "From", "To"]``.
+    """
 
     seen: set[str] = set()
     ordered: list[str] = []
@@ -214,7 +370,16 @@ def _validate_role_columns(
     characteristic_beg_columns: Sequence[str],
     characteristic_end_columns: Sequence[str],
 ) -> None:
-    """Ensure configured column roles do not reuse the same source column."""
+    """Reject overlapping semantic roles across configured source columns.
+
+    This helper exists to prevent ambiguous output rules, such as a column
+    serving as both an ID and a characteristic source. It is called directly by
+    ``interval_stitch()`` before any frame preparation begins.
+
+    Example:
+        using ``id_column="ID"`` and
+        ``characteristic_beg_columns=["ID"]`` raises ``ValueError``.
+    """
 
     role_columns = [id_column, from_column, to_column, *characteristic_beg_columns, *characteristic_end_columns]
     if len(set(role_columns)) != len(role_columns):
@@ -230,7 +395,17 @@ def _prepare_frame(
     characteristic_beg_columns: Sequence[str],
     characteristic_end_columns: Sequence[str],
 ) -> tuple[pl.DataFrame, _TemporalKind]:
-    """Validate required columns and coerce interval bounds to a shared precision."""
+    """Build the normalized working frame consumed by the stitching algorithm.
+
+    This helper exists to centralize input conversion, required-column checks,
+    row-order preservation, temporal-type resolution, and null validation. It
+    is the main setup step called by ``interval_stitch()`` before any sorting,
+    grouping, or gap calculations happen.
+
+    Example:
+        a frame with string ``From``/``To`` columns is converted into a working
+        frame with normalized temporal dtypes plus ``__rangestitch_input_order``.
+    """
 
     frame = _frame_from_input(data_frame)
     required_columns = _ordered_unique(
@@ -261,7 +436,17 @@ def _build_aggregation_expressions(
     characteristic_beg_columns: Sequence[str],
     characteristic_end_columns: Sequence[str],
 ) -> list[pl.Expr]:
-    """Build the group-by aggregations used to collapse stitched interval blocks."""
+    """Assemble the group-by expressions that collapse one stitched block.
+
+    This helper exists to keep the main group-by readable while encoding the
+    library's begin/end characteristic rules in one place. It is used by
+    ``interval_stitch()`` inside the final block-level aggregation.
+
+    Example:
+        the returned expressions make ``From`` use ``first()``, ``To`` use
+        ``max()``, begin columns use ``first()``, and end columns come from the
+        row matching ``__rangestitch_block_max_to``.
+    """
 
     expressions = [
         pl.col(from_column).first().alias(from_column),
@@ -279,7 +464,16 @@ def _build_aggregation_expressions(
 
 
 def _validate_output_columns(output_columns: Sequence[str], available_columns: Sequence[str]) -> None:
-    """Validate that requested output columns exist in the computed result."""
+    """Ensure a requested output projection matches the available result schema.
+
+    This helper exists to fail early with a clear error instead of letting a
+    later ``select`` raise a less targeted exception. It is used by
+    ``interval_stitch()`` for both empty-result handling and final projection.
+
+    Example:
+        requesting ``["ID", "MissingColumn"]`` raises ``ValueError`` if
+        ``"MissingColumn"`` is not part of the computed result.
+    """
 
     invalid = [column for column in output_columns if column not in available_columns]
     if invalid:
@@ -288,7 +482,16 @@ def _validate_output_columns(output_columns: Sequence[str], available_columns: S
 
 
 def _normalize_difference_column(difference_column: str) -> str:
-    """Validate the configured gap-diagnostics output column name."""
+    """Validate the configured name for the optional gap-diagnostics column.
+
+    This helper exists so diagnostics-related validation stays separate from
+    the core stitching logic. It is called by ``interval_stitch()`` before
+    deciding whether to add the gap column.
+
+    Example:
+        ``"GapDays"`` is accepted and returned unchanged, while ``""`` raises
+        ``TypeError``.
+    """
 
     if not isinstance(difference_column, str) or not difference_column:
         raise TypeError("difference_column must be a non-empty string")
@@ -296,7 +499,16 @@ def _normalize_difference_column(difference_column: str) -> str:
 
 
 def _validate_required_columns(frame: pl.DataFrame, required_columns: Sequence[str]) -> None:
-    """Validate that all requested columns exist in the input DataFrame."""
+    """Ensure every source column needed by stitching is present in the input.
+
+    This helper exists to produce a focused error before any coercion or sort
+    work starts. It is used by ``_prepare_frame()`` after determining which
+    columns ``interval_stitch()`` needs.
+
+    Example:
+        if the frame has ``["ID", "From"]`` but ``"To"`` is required, the
+        helper raises ``ValueError``.
+    """
 
     missing = [column for column in required_columns if column not in frame.columns]
     if missing:
@@ -309,14 +521,32 @@ def _validate_difference_column_name(
     *,
     existing_columns: Sequence[str],
 ) -> None:
-    """Ensure the diagnostics column does not collide with existing output columns."""
+    """Reject gap-diagnostics names that would collide with selected columns.
+
+    This helper exists to avoid silently overwriting real output fields when
+    diagnostics are enabled. It is used by ``interval_stitch()`` when building
+    either empty or populated results with the optional gap column.
+
+    Example:
+        if ``difference_column="From"``, enabling diagnostics raises
+        ``ValueError`` because that output name already exists.
+    """
 
     if difference_column in existing_columns:
         raise ValueError("difference_column must not overlap other selected columns")
 
 
 def _normalize_gap_units(gap_units: str) -> _GapUnit:
-    """Validate and normalize the configured gap units."""
+    """Normalize user-facing gap-unit spellings into the internal enum values.
+
+    This helper exists so the public API can accept a few human-friendly
+    aliases while the rest of the code works with one canonical set of units.
+    It is called by ``interval_stitch()`` before gap-threshold normalization.
+
+    Example:
+        ``"minutes"`` normalizes to ``"mins"`` and ``"hr"`` normalizes to
+        ``"hours"``.
+    """
 
     if not isinstance(gap_units, str):
         raise TypeError("gap_units must be a string")
@@ -332,7 +562,18 @@ def _normalize_gap_threshold(
     gap_units: _GapUnit,
     temporal_kind: _TemporalKind,
 ) -> timedelta:
-    """Convert the configured gap threshold into a comparable ``timedelta``."""
+    """Convert the configured gap threshold into one comparable ``timedelta``.
+
+    This helper exists because the public API allows both numeric thresholds
+    and ``timedelta`` objects, with extra rules for date-only workflows. It is
+    called by ``interval_stitch()`` before the block-building expressions
+    compare gaps between adjacent periods.
+
+    Example:
+        ``gap_threshold=30`` with ``gap_units="mins"`` becomes
+        ``timedelta(minutes=30)``, while ``gap_threshold=1`` with
+        ``gap_units="auto"`` becomes ``timedelta(days=1)``.
+    """
 
     if isinstance(gap_threshold, bool) or not isinstance(gap_threshold, (Real, timedelta)):
         raise TypeError("gap_threshold must be a non-negative number or datetime.timedelta")
@@ -386,6 +627,16 @@ def interval_stitch(
     columns. If either interval column is datetime-like, both columns are
     normalized to datetimes and time-of-day precision is preserved. Otherwise,
     interval bounds are normalized to calendar dates.
+
+    This public function exists as the package's single high-level API. It
+    orchestrates the private helpers in three phases: argument normalization
+    and validation, frame preparation and temporal coercion, then block
+    detection plus aggregation into stitched output rows.
+
+    Example:
+        two rows for the same ``ID`` with ``To=2020-01-10`` and
+        ``From=2020-01-11`` are stitched into one block when the effective gap
+        threshold is one day.
 
     Args:
         data_frame: A ``polars.DataFrame`` or iterable of row mappings
