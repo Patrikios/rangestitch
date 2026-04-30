@@ -491,9 +491,14 @@ The bundled tests cover:
 - tie behavior when multiple rows share the same final end bound
 - custom column mappings and stitcher reuse across multiple DataFrames
 - empty-result schema preservation
+- validation for overlapping column-role assignments
+- validation for duplicate or empty characteristic column-name arguments
 - validation for missing required characteristic columns
 - validation for non-DataFrame inputs
 - validation for non-temporal or mixed temporal interval columns
+- validation for mismatched Polars datetime precisions
+- validation for null IDs or null interval bounds
+- validation for negative or boolean `gap_threshold` values
 - validation for invalid sub-day thresholds on date columns
 - logging behavior
 - an optional deterministic 1,000,000-row timing test

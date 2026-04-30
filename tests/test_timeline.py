@@ -71,6 +71,47 @@ class IntervalStitchTests(unittest.TestCase):
 
         assert_frame_equal(actual, expected)
 
+    def test_overlapping_ranges_are_stitched(self) -> None:
+        data = pl.DataFrame(
+            [
+                {
+                    "ID": 3,
+                    "From": date(2021, 3, 1),
+                    "To": date(2021, 3, 10),
+                    "CharacteristicBeg": "created",
+                    "CharacteristicEnd1": 1,
+                    "CharacteristicEnd2": None,
+                },
+                {
+                    "ID": 3,
+                    "From": date(2021, 3, 5),
+                    "To": date(2021, 3, 20),
+                    "CharacteristicBeg": "updated",
+                    "CharacteristicEnd1": 8,
+                    "CharacteristicEnd2": 9,
+                },
+            ]
+        )
+
+        actual = RangeStitch(
+            characteristic_beg_columns="CharacteristicBeg",
+            characteristic_end_columns=["CharacteristicEnd1", "CharacteristicEnd2"],
+        ).stitch(data)
+        expected = pl.DataFrame(
+            [
+                {
+                    "ID": "3",
+                    "From": date(2021, 3, 1),
+                    "To": date(2021, 3, 20),
+                    "CharacteristicBeg": "created",
+                    "CharacteristicEnd1": 8,
+                    "CharacteristicEnd2": 9,
+                }
+            ]
+        ).cast(actual.schema)
+
+        assert_frame_equal(actual, expected)
+
     def test_equal_end_date_keeps_existing_end_characteristics(self) -> None:
         data = pl.DataFrame(
             [
@@ -339,6 +380,62 @@ class IntervalStitchTests(unittest.TestCase):
                 characteristic_end_columns="CharacteristicEnd1",
             ).stitch(data)
 
+    def test_overlapping_column_roles_raise_validation_error(self) -> None:
+        data = pl.DataFrame(
+            [
+                {
+                    "ID": 1,
+                    "From": date(2020, 1, 1),
+                    "To": date(2020, 1, 2),
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "column roles must not overlap"):
+            RangeStitch(
+                id_column="ID",
+                characteristic_beg_columns="ID",
+            ).stitch(data)
+
+    def test_duplicate_characteristic_column_names_raise_validation_error(self) -> None:
+        data = pl.DataFrame(
+            [
+                {
+                    "ID": 1,
+                    "From": date(2020, 1, 1),
+                    "To": date(2020, 1, 2),
+                    "CharacteristicBeg": "a",
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "characteristic_beg_columns must not contain duplicate column names",
+        ):
+            RangeStitch(
+                characteristic_beg_columns=["CharacteristicBeg", "CharacteristicBeg"],
+            ).stitch(data)
+
+    def test_empty_characteristic_column_name_raises_type_error(self) -> None:
+        data = pl.DataFrame(
+            [
+                {
+                    "ID": 1,
+                    "From": date(2020, 1, 1),
+                    "To": date(2020, 1, 2),
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "characteristic_end_columns must contain non-empty column names",
+        ):
+            RangeStitch(
+                characteristic_end_columns=[""],
+            ).stitch(data)
+
     def test_datetime_ranges_support_timedelta_gap_threshold(self) -> None:
         data = pl.DataFrame(
             [
@@ -402,6 +499,37 @@ class IntervalStitchTests(unittest.TestCase):
                 gap_threshold=timedelta(minutes=30),
             ).stitch(data)
 
+    def test_negative_gap_threshold_raises_validation_error(self) -> None:
+        data = pl.DataFrame(
+            [
+                {
+                    "ID": 1,
+                    "From": date(2020, 1, 1),
+                    "To": date(2020, 1, 1),
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "gap_threshold must be greater than or equal to 0"):
+            RangeStitch(gap_threshold=-1).stitch(data)
+
+    def test_boolean_gap_threshold_raises_type_error(self) -> None:
+        data = pl.DataFrame(
+            [
+                {
+                    "ID": 1,
+                    "From": date(2020, 1, 1),
+                    "To": date(2020, 1, 1),
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "gap_threshold must be a non-negative number or datetime.timedelta",
+        ):
+            RangeStitch(gap_threshold=True).stitch(data)
+
     def test_range_stitch_requires_polars_dataframe_input(self) -> None:
         with self.assertRaisesRegex(TypeError, "data_frame must be a polars.DataFrame"):
             RangeStitch().stitch([{"ID": 1, "From": date(2020, 1, 1), "To": date(2020, 1, 1)}])
@@ -437,6 +565,23 @@ class IntervalStitchTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "must both be pl.Date or matching pl.Datetime columns"):
             RangeStitch().stitch(data)
 
+    def test_range_stitch_rejects_mismatched_datetime_precisions(self) -> None:
+        data = pl.DataFrame(
+            {
+                "ID": [1],
+                "From": [datetime(2024, 1, 1, 0, 0, 0)],
+                "To": [datetime(2024, 1, 2, 0, 0, 0)],
+            },
+            schema={
+                "ID": pl.Int64,
+                "From": pl.Datetime("us"),
+                "To": pl.Datetime("ms"),
+            },
+        )
+
+        with self.assertRaisesRegex(TypeError, "must use the same Polars Datetime dtype"):
+            RangeStitch().stitch(data)
+
     def test_empty_input_preserves_output_schema(self) -> None:
         data = pl.DataFrame(
             schema={
@@ -464,6 +609,40 @@ class IntervalStitchTests(unittest.TestCase):
             },
         )
         self.assertEqual(actual.height, 0)
+
+    def test_null_id_raises_validation_error(self) -> None:
+        data = pl.DataFrame(
+            {
+                "ID": [1, None],
+                "From": [date(2020, 1, 1), date(2020, 1, 2)],
+                "To": [date(2020, 1, 1), date(2020, 1, 2)],
+            },
+            schema={
+                "ID": pl.Int64,
+                "From": pl.Date,
+                "To": pl.Date,
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "ID cannot be null"):
+            RangeStitch().stitch(data)
+
+    def test_null_interval_bound_raises_validation_error(self) -> None:
+        data = pl.DataFrame(
+            {
+                "ID": [1],
+                "From": [None],
+                "To": [date(2020, 1, 1)],
+            },
+            schema={
+                "ID": pl.Int64,
+                "From": pl.Date,
+                "To": pl.Date,
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "From and To cannot be null"):
+            RangeStitch().stitch(data)
 
     def test_range_stitch_uses_logging_instead_of_print(self) -> None:
         data = pl.DataFrame(
