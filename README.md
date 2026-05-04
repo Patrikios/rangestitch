@@ -28,14 +28,6 @@ Install directly from a public GitHub repository:
 pip install git+https://github.com/patrikios/rangestitch.git
 ```
 
-Install a specific branch, tag, or commit:
-
-```bash
-pip install git+https://github.com/patrikios/rangestitch.git@main
-pip install git+https://github.com/patrikios/rangestitch.git@<tag>
-pip install git+https://github.com/patrikios/rangestitch.git@<commit-hash>
-```
-
 Install from the repository:
 
 ```bash
